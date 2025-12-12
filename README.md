@@ -80,10 +80,10 @@ High-level architecture and data flow diagrams are provided below. For a detaile
 ![System Overview (One)](Diagram/a.drawio.png)
 ![System Overview (One)](Diagram/b.drawio.png)
 
-
 ![System Overview (Two)](Diagram/two.drawio.png)
 
 ## Git Stategy
+
 If we follow this architecture, we will get best output
 ![System Overview (One)](Diagram/One.drawio.png)
 Full design: [Diagram/full architecture.drawio.pdf](Diagram/full%20architecture.drawio.pdf)
@@ -566,6 +566,7 @@ npm run start
 ```
 
 **🚀 Server URLs**:
+
 - **API Server**: http://localhost:3000
 - **API Documentation**: http://localhost:3000/docs
 - **OpenAPI Spec**: http://localhost:3000/openapi
@@ -582,17 +583,18 @@ npm run docker:prod
 
 **🐳 Docker Compose includes**:
 
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| API Server | http://localhost:3000 | - |
-| RustFS Storage Console | http://localhost:9001 | `rustfsadmin/rustfsadmin` |
-| Observability Dashboard | http://localhost:4173 | - |
-| Jaeger UI | http://localhost:16686 | - |
-| Prometheus | http://localhost:9090 | - |
-| Grafana | http://localhost:3001 | `admin/admin` |
-| Node Exporter | http://localhost:9100 | - |
+| Service                 | URL                    | Credentials               |
+| ----------------------- | ---------------------- | ------------------------- |
+| API Server              | http://localhost:3000  | -                         |
+| RustFS Storage Console  | http://localhost:9001  | `rustfsadmin/rustfsadmin` |
+| Observability Dashboard | http://localhost:4173  | -                         |
+| Jaeger UI               | http://localhost:16686 | -                         |
+| Prometheus              | http://localhost:9090  | -                         |
+| Grafana                 | http://localhost:3001  | `admin/admin`             |
+| Node Exporter           | http://localhost:9100  | -                         |
 
 **📝 Notes**:
+
 - The bucket bootstrap container ensures `downloads` bucket exists before the API starts
 - When accessing from host browser, use `VITE_API_BASE_URL=http://localhost:3000`
 - Service names like `delineate-app` are only resolvable inside Docker network
@@ -711,6 +713,7 @@ npm run docker:prod  # Start with Docker (production)
 ## 📞 Support
 
 For questions or issues related to this hackathon challenge:
+
 - Open an issue on [GitHub](https://github.com/bongodev/cuet-micro-ops-hackthon-2025/issues)
 - Check the [ARCHITECTURE.md](ARCHITECTURE.md) for implementation guidance
 
@@ -724,4 +727,4 @@ See [LICENSE](LICENSE) file for details.
 
 **Happy Hacking! 🚀**
 
-*CUET Fest 2025 - Micro-OPS Hackathon*
+_CUET Fest 2025 - Micro-OPS Hackathon_

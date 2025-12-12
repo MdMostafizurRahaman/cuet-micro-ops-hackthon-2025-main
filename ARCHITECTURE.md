@@ -35,7 +35,9 @@ The following diagrams illustrate the proposed system architecture and data flow
 ![System Overview (Two)](Diagram/two.drawio.png)
 
 #### Full Architecture Document
+
 📄 [Complete Architecture PDF](Diagram/full%20architecture.drawio.pdf)
+
 ## 2. Technical Approach (Chosen: Polling Pattern)
 
 We choose **Option A: Polling** because it is simple, robust across proxies and browsers, and avoids long-held HTTP connections. It works well even behind strict gateways (Cloudflare/nginx/ALB) and is easy to scale horizontally.
@@ -49,6 +51,7 @@ Client → GET  /v1/download/:jobId (when ready) → 302 to presigned S3 URL
 ```
 
 Benefits:
+
 - Eliminates gateway timeouts by returning quickly.
 - Supports stateless retries and simple deduplication via `clientRequestId`.
 - Plays nicely with CDNs and reverse proxies.
@@ -70,7 +73,11 @@ Benefits:
       "status": "queued|running|processing_artifacts|completed|failed|expired",
       "progress": { "percent": 0 },
       "attempts": 1,
-      "timestamps": { "queuedAt": "...", "startedAt": "...", "updatedAt": "..." },
+      "timestamps": {
+        "queuedAt": "...",
+        "startedAt": "...",
+        "updatedAt": "..."
+      },
       "result": { "url": "https://...", "expiresAt": "..." }
     }
     ```
@@ -107,6 +114,7 @@ Use a cache (Redis or in-memory for demo) to track jobs:
 - TTL: configurable `DOWNLOAD_JOB_TTL_MS` to auto-expire old jobs.
 
 S3:
+
 - Bucket: `downloads`
 - Use presigned URLs for direct downloads (short TTLs, e.g., 10–30 minutes).
 
@@ -152,17 +160,17 @@ server {
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
-    
+
     # Short timeouts for fast requests
     proxy_read_timeout 60s;
     proxy_send_timeout 60s;
     proxy_connect_timeout 10s;
-    
+
     # Buffering settings
     proxy_buffering on;
     proxy_buffer_size 4k;
     proxy_buffers 8 4k;
-    
+
     # Headers
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -173,6 +181,7 @@ server {
 ```
 
 **Key Settings**:
+
 - `proxy_read_timeout`: 60s (sufficient for polling pattern)
 - `proxy_buffering`: Enabled for better performance
 - Keep timeouts short since we're not holding long connections
@@ -180,21 +189,23 @@ server {
 ### 4.3 AWS ALB Configuration
 
 **Settings**:
+
 - **Idle Timeout**: Default 60s is fine for polling
 - **Connection Draining**: Enable with 30s timeout
 - **Health Checks**: Configure to `/health` endpoint
 - **Target Group**: Use HTTP with path pattern routing
 
 **Example ALB Configuration**:
+
 ```yaml
 TargetGroupAttributes:
   - Key: deregistration_delay.timeout_seconds
-    Value: '30'
+    Value: "30"
   - Key: stickiness.enabled
-    Value: 'true'
+    Value: "true"
   - Key: stickiness.type
-    Value: 'lb_cookie'
-    
+    Value: "lb_cookie"
+
 HealthCheckConfiguration:
   Path: /health
   Interval: 30
@@ -212,21 +223,24 @@ HealthCheckConfiguration:
 ```typescript
 // 1. Initiate Download
 const initiateDownload = async (fileId: number) => {
-  const response = await fetch('/v1/download/initiate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ file_id: fileId })
+  const response = await fetch("/v1/download/initiate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_id: fileId }),
   });
   const { jobId, nextPollInMs } = await response.json();
-  
+
   // Save to localStorage for persistence
-  localStorage.setItem(`job_${jobId}`, JSON.stringify({ 
-    jobId, 
-    fileId, 
-    status: 'queued',
-    createdAt: new Date().toISOString()
-  }));
-  
+  localStorage.setItem(
+    `job_${jobId}`,
+    JSON.stringify({
+      jobId,
+      fileId,
+      status: "queued",
+      createdAt: new Date().toISOString(),
+    }),
+  );
+
   return { jobId, nextPollInMs };
 };
 
@@ -234,15 +248,18 @@ const initiateDownload = async (fileId: number) => {
 const pollJobStatus = async (jobId: string) => {
   const response = await fetch(`/v1/download/status/${jobId}`);
   const status = await response.json();
-  
+
   // Update localStorage
-  const existing = JSON.parse(localStorage.getItem(`job_${jobId}`) || '{}');
-  localStorage.setItem(`job_${jobId}`, JSON.stringify({
-    ...existing,
-    ...status,
-    lastPolled: new Date().toISOString()
-  }));
-  
+  const existing = JSON.parse(localStorage.getItem(`job_${jobId}`) || "{}");
+  localStorage.setItem(
+    `job_${jobId}`,
+    JSON.stringify({
+      ...existing,
+      ...status,
+      lastPolled: new Date().toISOString(),
+    }),
+  );
+
   return status;
 };
 
@@ -256,23 +273,24 @@ const downloadFile = async (jobId: string) => {
 ### 5.2 UI Components
 
 **Progress Component**:
+
 ```typescript
 const DownloadProgress = ({ jobId }: { jobId: string }) => {
   const [status, setStatus] = useState(null);
-  
+
   useEffect(() => {
     const interval = setInterval(async () => {
       const data = await pollJobStatus(jobId);
       setStatus(data);
-      
+
       if (data.status === 'completed' || data.status === 'failed') {
         clearInterval(interval);
       }
     }, 5000); // Poll every 5 seconds
-    
+
     return () => clearInterval(interval);
   }, [jobId]);
-  
+
   return (
     <div>
       <h3>Download Status: {status?.status}</h3>
@@ -297,19 +315,20 @@ const DownloadProgress = ({ jobId }: { jobId: string }) => {
 ### 5.4 Concurrency Management
 
 Track multiple jobs:
+
 ```typescript
 const useDownloads = () => {
   const [jobs, setJobs] = useState<Job[]>([]);
-  
+
   useEffect(() => {
     // Load all jobs from localStorage on mount
     const allJobs = Object.keys(localStorage)
-      .filter(key => key.startsWith('job_'))
-      .map(key => JSON.parse(localStorage.getItem(key) || '{}'));
-    
+      .filter((key) => key.startsWith("job_"))
+      .map((key) => JSON.parse(localStorage.getItem(key) || "{}"));
+
     setJobs(allJobs);
   }, []);
-  
+
   return { jobs, addJob, removeJob };
 };
 ```
@@ -317,6 +336,7 @@ const useDownloads = () => {
 ### 5.5 Observability Integration
 
 **Sentry Error Boundary**:
+
 ```typescript
 import * as Sentry from '@sentry/react';
 
@@ -326,17 +346,18 @@ import * as Sentry from '@sentry/react';
 ```
 
 **OpenTelemetry Spans**:
-```typescript
-import { trace } from '@opentelemetry/api';
 
-const tracer = trace.getTracer('download-frontend');
+```typescript
+import { trace } from "@opentelemetry/api";
+
+const tracer = trace.getTracer("download-frontend");
 
 const downloadWithTracing = async (fileId: number) => {
-  return tracer.startActiveSpan('download-initiate', async (span) => {
+  return tracer.startActiveSpan("download-initiate", async (span) => {
     try {
       const result = await initiateDownload(fileId);
       span.setStatus({ code: SpanStatusCode.OK });
-      span.setAttribute('job.id', result.jobId);
+      span.setAttribute("job.id", result.jobId);
       return result;
     } catch (error) {
       span.setStatus({ code: SpanStatusCode.ERROR });
@@ -350,17 +371,18 @@ const downloadWithTracing = async (fileId: number) => {
 ```
 
 **Trace Propagation**:
+
 ```typescript
 // Inject traceparent header in all API calls
 const fetchWithTracing = async (url: string, options: RequestInit) => {
   const span = trace.getActiveSpan();
   const headers = {
     ...options.headers,
-    'traceparent': span?.spanContext() ? 
-      `00-${span.spanContext().traceId}-${span.spanContext().spanId}-01` : 
-      undefined
+    traceparent: span?.spanContext()
+      ? `00-${span.spanContext().traceId}-${span.spanContext().spanId}-01`
+      : undefined,
   };
-  
+
   return fetch(url, { ...options, headers });
 };
 ```
