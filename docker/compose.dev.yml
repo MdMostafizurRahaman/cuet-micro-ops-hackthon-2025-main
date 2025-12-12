@@ -87,6 +87,60 @@ services:
         mc mb -p delineate/downloads || true
     restart: "no"
 
+  delineate-frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:3000
+        VITE_SENTRY_DSN: ${SENTRY_DSN:-}
+        VITE_OTEL_EXPORTER_URL: http://localhost:4318/v1/traces
+        VITE_JAEGER_UI_URL: http://localhost:16686
+    ports:
+      - "4173:4173"
+    depends_on:
+      delineate-app:
+        condition: service_started
+    restart: unless-stopped
+
+  delineate-node-exporter:
+    image: prom/node-exporter:latest
+    command:
+      - "--path.rootfs=/host"
+    volumes:
+      - /:/host:ro
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+
+  delineate-prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    depends_on:
+      delineate-node-exporter:
+        condition: service_started
+
+  delineate-grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3001:3000"
+    volumes:
+      - delineate-grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      delineate-prometheus:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   delineate-storage-data:
   delineate-storage-logs:
+  delineate-grafana-data:

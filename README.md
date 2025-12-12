@@ -76,6 +76,15 @@ Set `VITE_API_BASE_URL` to target remote deployments.
 
 ---
 
+### Challenge 4: Observability Dashboard (Bonus)
+
+- `frontend/` now hosts the **Download Observability Dashboard**. It shows health, job progress, error logs, a trace viewer, and live performance metrics while automatically persisting jobs and instrumenting every request.
+- `@sentry/react` wraps the entire UI with an error boundary, captures failed API calls, and exposes the “Send Feedback” dialog. Set `SENTRY_DSN` in `.env` and `VITE_SENTRY_DSN` (or build-time environment variables for Docker) to wire it to your project.
+- Frontend OpenTelemetry instrumentation (see `frontend/src/observability.ts`) starts spans for all user interactions, injects `traceparent` headers, and exports them via OTLP/HTTP to the Jaeger all-in-one collector (`http://localhost:4318/v1/traces`). Traces appear instantly under `http://localhost:16686`.
+- Docker Compose now ships a monitoring stack: Jaeger, Prometheus, Grafana, and Node Exporter. Prometheus scrapes `delineate-node-exporter:9100`, and Grafana auto-loads a Node overview dashboard (http://localhost:3001, admin/admin). The frontend container runs on http://localhost:4173.
+- Trigger the Sentry smoke test anytime with:  
+  `curl -X POST "http://localhost:3000/v1/download/check?sentry_test=true" -H "Content-Type: application/json" -d '{"file_id":70000}'`.
+
 ### Challenge 1: Self-Hosted S3 Storage Integration
 
 #### Your Mission
@@ -471,7 +480,17 @@ npm run docker:dev
 npm run docker:prod
 ```
 
-Running either compose file now starts a self-hosted RustFS instance (`delineate-storage`) plus a small init job that fixes volume permissions and creates the mandatory `downloads` bucket before the API boots. Access the RustFS console at http://localhost:9001 (user: `rustfsadmin`, password: `rustfsadmin`) while the API resolves the storage service internally via `http://delineate-storage:9000`.
+Running either compose file now starts:
+
+- The API (`delineate-app`)
+- RustFS object storage (console: http://localhost:9001, auth `rustfsadmin/rustfsadmin`)
+- The observability dashboard (http://localhost:4173)
+- Jaeger all-in-one + OTLP collector (http://localhost:16686)
+- Prometheus (http://localhost:9090), Grafana (http://localhost:3001, admin/admin), and Node Exporter (scrape target on port 9100)
+
+The bucket bootstrap container still ensures `downloads` exists before the API begins accepting traffic.
+
+If you hit the dashboard from your host browser, ensure the frontend env points to host URLs (defaults already set): `VITE_API_BASE_URL=http://localhost:3000` and `VITE_OTEL_EXPORTER_URL=http://localhost:4318/v1/traces`. Service names like `delineate-app` are only resolvable inside the Docker network, not from the browser.
 
 ## Environment Variables
 
