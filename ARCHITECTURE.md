@@ -22,7 +22,7 @@ flowchart LR
     end
     subgraph API Tier
         C[Download API (Hono)]
-        H[(Redis\nJob + Status Store)]
+        H[(Redis / Job + Status Store)]
     end
     subgraph Worker Tier
         D[BullMQ Queue]
