@@ -54,6 +54,26 @@ curl -X POST http://localhost:3000/v1/download/start \
 | Challenge 4: Observability (Bonus)  | 10         | Hard       |
 | **Maximum Total**                   | **50**     |            |
 
+### Challenge 2: Long-Running Download Architecture
+
+The API now implements the asynchronous polling design described in `ARCHITECTURE.txt`:
+
+- `POST /v1/download/initiate` immediately returns `{ jobId, nextPollInMs, expiresAt }` and enqueues the work in an in-memory BullMQ-inspired queue. Requests accept optional `clientRequestId`, `priority`, and `userId` fields to deduplicate submissions.
+- `GET /v1/download/status/:jobId` exposes progress, attempts, timestamps, and the eventual presigned URL metadata so browsers can poll without holding the original connection open.
+- `GET /v1/download/:jobId` redirects to the short-lived download URL (or returns JSON when `?format=json` is provided). If the job is still running, it returns HTTP 409 alongside the latest status payload.
+
+Simulated workers respect environment variables like `DOWNLOAD_WORKER_CONCURRENCY`, `DOWNLOAD_DELAY_*`, and `DOWNLOAD_JOB_TTL_MS`. Jobs transition through `queued → running → processing_artifacts → completed/failed`, and expired jobs are cleaned up automatically.
+
+To demonstrate frontend integration, a lightweight React dashboard lives under `frontend/`. It stores job IDs in `localStorage`, polls `/v1/download/status/:jobId` every five seconds, and links directly to `/v1/download/:jobId` once completed. Run it with:
+
+```bash
+cd frontend
+npm install
+npm run dev -- --open
+```
+
+Set `VITE_API_BASE_URL` to target remote deployments.
+
 ---
 
 ### Challenge 1: Self-Hosted S3 Storage Integration
@@ -90,7 +110,7 @@ Your solution must:
 #### Hints
 
 1. The API expects these S3 environment variables:
-   - `S3_ENDPOINT` - Your storage service URL (e.g., `http://minio:9000`)
+   - `S3_ENDPOINT` - Your storage service URL (e.g., `http://delineate-storage:9000` when using the bundled RustFS service)
    - `S3_ACCESS_KEY_ID` - Access key
    - `S3_SECRET_ACCESS_KEY` - Secret key
    - `S3_BUCKET_NAME` - Bucket name (use `downloads`)
@@ -451,7 +471,7 @@ npm run docker:dev
 npm run docker:prod
 ```
 
-Running either compose file now starts a self-hosted MinIO instance (`delineate-storage`) plus a one-shot setup job that creates the mandatory `downloads` bucket before the API boots. You can access the MinIO console at http://localhost:9001 (user: `delineate`, password: `delineate123`) while the API resolves the storage service internally via `http://delineate-storage:9000`.
+Running either compose file now starts a self-hosted RustFS instance (`delineate-storage`) plus a small init job that fixes volume permissions and creates the mandatory `downloads` bucket before the API boots. Access the RustFS console at http://localhost:9001 (user: `rustfsadmin`, password: `rustfsadmin`) while the API resolves the storage service internally via `http://delineate-storage:9000`.
 
 ## Environment Variables
 
@@ -467,8 +487,8 @@ S3_REGION=us-east-1
 # When running with Docker Compose the service is reachable via delineate-storage
 S3_ENDPOINT=http://delineate-storage:9000
 # Use http://localhost:9000 when running the API outside of Docker Compose
-S3_ACCESS_KEY_ID=delineate
-S3_SECRET_ACCESS_KEY=delineate123
+S3_ACCESS_KEY_ID=rustfsadmin
+S3_SECRET_ACCESS_KEY=rustfsadmin
 S3_BUCKET_NAME=downloads
 S3_FORCE_PATH_STYLE=true
 

@@ -46,6 +46,8 @@ const EnvSchema = z.object({
   DOWNLOAD_DELAY_MIN_MS: z.coerce.number().int().min(0).default(10000), // 10 seconds
   DOWNLOAD_DELAY_MAX_MS: z.coerce.number().int().min(0).default(200000), // 200 seconds
   DOWNLOAD_DELAY_ENABLED: z.coerce.boolean().default(true),
+  DOWNLOAD_JOB_TTL_MS: z.coerce.number().int().min(60000).default(86400000), // 24 hours
+  DOWNLOAD_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
 });
 
 // Parse and validate environment
@@ -174,6 +176,17 @@ const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
+const DownloadPrioritySchema = z.enum(["standard", "low"]);
+const DownloadJobStatusSchema = z.enum([
+  "queued",
+  "running",
+  "processing_artifacts",
+  "completed",
+  "failed",
+  "cancelled",
+  "expired",
+]);
+
 // Download API Schemas
 const DownloadInitiateRequestSchema = z
   .object({
@@ -182,14 +195,47 @@ const DownloadInitiateRequestSchema = z
       .min(1)
       .max(1000)
       .openapi({ description: "Array of file IDs (10K to 100M)" }),
+    clientRequestId: z
+      .string()
+      .min(3)
+      .max(128)
+      .optional()
+      .openapi({
+        description:
+          "Optional idempotency key supplied by the client to deduplicate download initiation",
+      }),
+    priority: DownloadPrioritySchema.optional().openapi({
+      description: "Queue priority for the job",
+    }),
+    userId: z
+      .string()
+      .min(1)
+      .max(64)
+      .optional()
+      .openapi({
+        description: "Application user identifier for concurrency tracking",
+      }),
   })
   .openapi("DownloadInitiateRequest");
 
 const DownloadInitiateResponseSchema = z
   .object({
     jobId: z.string().openapi({ description: "Unique job identifier" }),
-    status: z.enum(["queued", "processing"]),
-    totalFileIds: z.number().int(),
+    status: DownloadJobStatusSchema,
+    nextPollInMs: z
+      .number()
+      .int()
+      .openapi({ description: "Suggested delay before polling status again" }),
+    expiresAt: z
+      .string()
+      .openapi({ description: "ISO timestamp when the job record expires" }),
+    deduplicated: z
+      .boolean()
+      .optional()
+      .openapi({
+        description:
+          "Indicates if an existing job was returned for the provided clientRequestId",
+      }),
   })
   .openapi("DownloadInitiateResponse");
 
@@ -251,6 +297,27 @@ const DownloadStartResponseSchema = z
     message: z.string().openapi({ description: "Status message" }),
   })
   .openapi("DownloadStartResponse");
+
+const DownloadJobStatusResponseSchema = z
+  .object({
+    jobId: z.string(),
+    status: DownloadJobStatusSchema,
+    progressPercent: z.number().int().min(0).max(100),
+    message: z.string(),
+    attempts: z.number().int().min(0),
+    downloadUrl: z.string().nullable(),
+    checksum: z.string().nullable(),
+    size: z.number().int().nullable(),
+    retryAfterMs: z.number().int().nullable(),
+    fileIds: z.array(z.number().int()),
+    priority: DownloadPrioritySchema,
+    userId: z.string(),
+    createdAt: z.string(),
+    startedAt: z.string().nullable(),
+    completedAt: z.string().nullable(),
+    expiresAt: z.string(),
+  })
+  .openapi("DownloadJobStatusResponse");
 
 // Input sanitization for S3 keys - prevent path traversal
 const sanitizeS3Key = (fileId: number): string => {
@@ -330,6 +397,204 @@ const getRandomDelay = (): number => {
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+type DownloadPriority = z.infer<typeof DownloadPrioritySchema>;
+type DownloadJobStatus = z.infer<typeof DownloadJobStatusSchema>;
+
+interface DownloadJob {
+  jobId: string;
+  fileIds: number[];
+  clientRequestId?: string;
+  userId: string;
+  status: DownloadJobStatus;
+  progressPercent: number;
+  message: string;
+  attempts: number;
+  downloadUrl: string | null;
+  checksum: string | null;
+  size: number | null;
+  retryAfterMs: number | null;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  updatedAt: number;
+  expiresAt: number;
+  priority: DownloadPriority;
+}
+
+const downloadJobs = new Map<string, DownloadJob>();
+const clientRequestJobIndex = new Map<string, string>();
+const jobQueue: string[] = [];
+let activeWorkers = 0;
+const DEFAULT_POLL_INTERVAL_MS = 5000;
+
+const toJobResponse = (job: DownloadJob) => ({
+  jobId: job.jobId,
+  status: job.status,
+  progressPercent: job.progressPercent,
+  message: job.message,
+  attempts: job.attempts,
+  downloadUrl: job.downloadUrl,
+  checksum: job.checksum,
+  size: job.size,
+  retryAfterMs: job.retryAfterMs,
+  fileIds: job.fileIds,
+  priority: job.priority,
+  userId: job.userId,
+  createdAt: new Date(job.createdAt).toISOString(),
+  startedAt: job.startedAt ? new Date(job.startedAt).toISOString() : null,
+  completedAt: job.completedAt ? new Date(job.completedAt).toISOString() : null,
+  expiresAt: new Date(job.expiresAt).toISOString(),
+});
+
+const createDownloadJob = (params: {
+  fileIds: number[];
+  priority: DownloadPriority;
+  clientRequestId?: string;
+  userId: string;
+}) => {
+  const now = Date.now();
+  const jobId = crypto.randomUUID();
+  const job: DownloadJob = {
+    jobId,
+    fileIds: params.fileIds,
+    clientRequestId: params.clientRequestId,
+    userId: params.userId,
+    status: "queued",
+    progressPercent: 0,
+    message: "Queued for processing",
+    attempts: 0,
+    downloadUrl: null,
+    checksum: null,
+    size: null,
+    retryAfterMs: null,
+    createdAt: now,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: now,
+    expiresAt: now + env.DOWNLOAD_JOB_TTL_MS,
+    priority: params.priority,
+  };
+  downloadJobs.set(jobId, job);
+  if (params.clientRequestId) {
+    clientRequestJobIndex.set(params.clientRequestId, jobId);
+  }
+  return job;
+};
+
+const enqueueJob = (jobId: string) => {
+  jobQueue.push(jobId);
+  processQueue();
+};
+
+const processQueue = () => {
+  if (activeWorkers >= env.DOWNLOAD_WORKER_CONCURRENCY) {
+    return;
+  }
+  const nextJobId = jobQueue.shift();
+  if (!nextJobId) return;
+  activeWorkers += 1;
+  runJob(nextJobId)
+    .catch((err: unknown) => {
+      console.error(`[Worker] Failed to process job ${nextJobId}:`, err);
+    })
+    .finally(() => {
+      activeWorkers = Math.max(0, activeWorkers - 1);
+      processQueue();
+    });
+};
+
+const runJob = async (jobId: string) => {
+  const job = downloadJobs.get(jobId);
+  if (!job) return;
+  job.attempts += 1;
+  job.status = "running";
+  job.message = "Validating file availability";
+  job.progressPercent = 5;
+  job.startedAt ??= Date.now();
+  job.updatedAt = Date.now();
+
+  const totalDuration = Math.max(1000, getRandomDelay());
+  const progressStepMs = Math.max(1000, Math.floor(totalDuration / 10));
+  let elapsed = 0;
+
+  const progressTimer = setInterval(() => {
+    elapsed += progressStepMs;
+    const percent = Math.min(95, Math.round((elapsed / totalDuration) * 100));
+    job.progressPercent = percent;
+    if (percent > 70 && job.status === "running") {
+      job.status = "processing_artifacts";
+      job.message = "Packaging download artifacts";
+    } else if (percent <= 70) {
+      job.message = "Processing source files";
+    }
+    job.updatedAt = Date.now();
+  }, progressStepMs);
+
+  try {
+    await sleep(totalDuration);
+    const availabilityResults = await Promise.all(
+      job.fileIds.map((fileId) => checkS3Availability(fileId)),
+    );
+
+    const allAvailable = availabilityResults.every((result) => result.available);
+    const totalSize =
+      availabilityResults.reduce(
+        (sum, result) => sum + (result.size ?? 0),
+        0,
+      ) || null;
+
+    if (allAvailable) {
+      job.status = "completed";
+      job.downloadUrl = `https://storage.example.com/downloads/${job.jobId}.zip?token=${crypto.randomUUID()}`;
+      job.checksum = crypto.randomUUID().replace(/-/g, "");
+      job.size = totalSize;
+      job.message = `Download ready after ${(totalDuration / 1000).toFixed(1)} seconds`;
+      job.retryAfterMs = null;
+    } else {
+      job.status = "failed";
+      job.downloadUrl = null;
+      job.size = null;
+      job.message = "One or more files were unavailable in storage";
+      job.retryAfterMs = 60000;
+    }
+  } catch (err) {
+    job.status = "failed";
+    job.downloadUrl = null;
+    job.size = null;
+    job.message =
+      err instanceof Error ? err.message : "Unexpected worker failure";
+    job.retryAfterMs = 60000;
+  } finally {
+    clearInterval(progressTimer);
+    job.progressPercent = job.status === "completed" ? 100 : job.progressPercent;
+    job.completedAt = Date.now();
+    job.updatedAt = Date.now();
+    job.expiresAt = Date.now() + env.DOWNLOAD_JOB_TTL_MS;
+  }
+};
+
+const jobJanitor = setInterval(() => {
+  const now = Date.now();
+  for (const [jobId, job] of downloadJobs.entries()) {
+    if (job.status !== "expired" && now >= job.expiresAt) {
+      job.status = "expired";
+      job.downloadUrl = null;
+      job.message = "Job expired. Initiate a new download to regenerate files.";
+      job.updatedAt = now;
+    }
+    const purgeAfter = job.expiresAt + env.DOWNLOAD_JOB_TTL_MS;
+    if (now >= purgeAfter) {
+      downloadJobs.delete(jobId);
+      if (job.clientRequestId) {
+        clientRequestJobIndex.delete(job.clientRequestId);
+      }
+    }
+  }
+}, 60000);
+
+if (typeof jobJanitor.unref === "function") {
+  jobJanitor.unref();
+}
 // Routes
 const rootRoute = createRoute({
   method: "get",
@@ -411,8 +676,16 @@ const downloadInitiateRoute = createRoute({
     },
   },
   responses: {
+    202: {
+      description: "Download job accepted for asynchronous processing",
+      content: {
+        "application/json": {
+          schema: DownloadInitiateResponseSchema,
+        },
+      },
+    },
     200: {
-      description: "Download job initiated",
+      description: "Existing job returned (idempotent clientRequestId)",
       content: {
         "application/json": {
           schema: DownloadInitiateResponseSchema,
@@ -432,6 +705,96 @@ const downloadInitiateRoute = createRoute({
       content: {
         "application/json": {
           schema: ErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const downloadStatusRoute = createRoute({
+  method: "get",
+  path: "/v1/download/status/:jobId",
+  tags: ["Download"],
+  summary: "Fetch download job status",
+  description:
+    "Returns asynchronous job metadata, including progress and download URL if ready",
+  request: {
+    params: z.object({
+      jobId: z
+        .string()
+        .min(1)
+        .openapi({ description: "Download job identifier" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Current job status",
+      content: {
+        "application/json": {
+          schema: DownloadJobStatusResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Job not found",
+      content: {
+        "application/json": {
+          schema: ErrorResponseSchema,
+        },
+      },
+    },
+  },
+});
+
+const downloadRetrieveRoute = createRoute({
+  method: "get",
+  path: "/v1/download/:jobId",
+  tags: ["Download"],
+  summary: "Retrieve completed download",
+  description:
+    "Redirects to the presigned URL when the job is completed or returns the latest status when still processing.",
+  request: {
+    params: z.object({
+      jobId: z
+        .string()
+        .min(1)
+        .openapi({ description: "Download job identifier" }),
+    }),
+    query: z.object({
+      format: z
+        .enum(["json"])
+        .optional()
+        .openapi({
+          description:
+            "Set to json to receive a JSON payload instead of a redirect",
+        }),
+    }),
+  },
+  responses: {
+    302: {
+      description: "Redirect to presigned download URL",
+    },
+    200: {
+      description: "JSON download metadata",
+      content: {
+        "application/json": {
+          schema: DownloadJobStatusResponseSchema,
+        },
+      },
+    },
+    404: {
+      description: "Job not found",
+      content: {
+        "application/json": {
+          schema: ErrorResponseSchema,
+        },
+      },
+    },
+    409: {
+      description: "Job not ready",
+      content: {
+        "application/json": {
+          schema: DownloadJobStatusResponseSchema,
         },
       },
     },
@@ -489,16 +852,96 @@ const downloadCheckRoute = createRoute({
 });
 
 app.openapi(downloadInitiateRoute, (c) => {
-  const { file_ids } = c.req.valid("json");
-  const jobId = crypto.randomUUID();
+  const { file_ids, clientRequestId, priority, userId } = c.req.valid("json");
+  const normalizedPriority: DownloadPriority = priority ?? "standard";
+  const normalizedUserId = userId ?? "anonymous";
+  const trimmedClientId = clientRequestId?.trim();
+
+  if (trimmedClientId) {
+    const existingJobId = clientRequestJobIndex.get(trimmedClientId);
+    if (existingJobId) {
+      const existingJob = downloadJobs.get(existingJobId);
+      if (existingJob) {
+        return c.json(
+          {
+            jobId: existingJob.jobId,
+            status: existingJob.status,
+            nextPollInMs: DEFAULT_POLL_INTERVAL_MS,
+            expiresAt: new Date(existingJob.expiresAt).toISOString(),
+            totalFileIds: existingJob.fileIds.length,
+            deduplicated: true,
+          },
+          200,
+        );
+      }
+    }
+  }
+
+  const job = createDownloadJob({
+    fileIds: file_ids,
+    priority: normalizedPriority,
+    clientRequestId: trimmedClientId,
+    userId: normalizedUserId,
+  });
+
+  const enqueueHandle = setTimeout(() => {
+    enqueueJob(job.jobId);
+  }, 0);
+  if (typeof enqueueHandle.unref === "function") {
+    enqueueHandle.unref();
+  }
+
   return c.json(
     {
-      jobId,
-      status: "queued" as const,
-      totalFileIds: file_ids.length,
+      jobId: job.jobId,
+      status: job.status,
+      nextPollInMs: DEFAULT_POLL_INTERVAL_MS,
+      expiresAt: new Date(job.expiresAt).toISOString(),
+      totalFileIds: job.fileIds.length,
     },
-    200,
+    202,
   );
+});
+
+app.openapi(downloadStatusRoute, (c) => {
+  const { jobId } = c.req.valid("param");
+  const job = downloadJobs.get(jobId);
+  if (!job) {
+    return c.json(
+      {
+        error: "Not Found",
+        message: `Job ${jobId} was not found or has expired`,
+        requestId: c.get("requestId"),
+      },
+      404,
+    );
+  }
+  return c.json(toJobResponse(job), 200);
+});
+
+app.openapi(downloadRetrieveRoute, (c) => {
+  const { jobId } = c.req.valid("param");
+  const { format } = c.req.valid("query");
+  const job = downloadJobs.get(jobId);
+  if (!job) {
+    return c.json(
+      {
+        error: "Not Found",
+        message: `Job ${jobId} was not found or has expired`,
+        requestId: c.get("requestId"),
+      },
+      404,
+    );
+  }
+
+  if (job.status !== "completed" || !job.downloadUrl) {
+    return c.json(toJobResponse(job), 409);
+  }
+
+  if (format === "json") {
+    return c.json(toJobResponse(job), 200);
+  }
+  return c.redirect(job.downloadUrl, 302);
 });
 
 app.openapi(downloadCheckRoute, async (c) => {

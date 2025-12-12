@@ -32,16 +32,41 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
 
   delineate-storage:
-    image: minio/minio:latest
-    command: server /data --console-address :9001
+    image: rustfs/rustfs:latest
     environment:
-      MINIO_ROOT_USER: delineate
-      MINIO_ROOT_PASSWORD: delineate123
+      RUSTFS_VOLUMES: /data/rustfs{0...3}
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_EXTERNAL_ADDRESS: :9000
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS: "*"
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_OBS_LOGGER_LEVEL: info
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
       - delineate-storage-data:/data
+      - delineate-storage-logs:/app/logs
+    depends_on:
+      delineate-storage-perms:
+        condition: service_completed_successfully
+
+  delineate-storage-perms:
+    image: alpine:3.20
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mkdir -p /data/rustfs0 /data/rustfs1 /data/rustfs2 /data/rustfs3
+        chown -R 10001:10001 /data /logs
+    volumes:
+      - delineate-storage-data:/data
+      - delineate-storage-logs:/logs
+    restart: "no"
 
   delineate-storage-setup:
     image: minio/mc:latest
@@ -49,8 +74,8 @@ services:
       delineate-storage:
         condition: service_started
     environment:
-      MINIO_ROOT_USER: delineate
-      MINIO_ROOT_PASSWORD: delineate123
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-rustfsadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-rustfsadmin}
     entrypoint:
       - /bin/sh
       - -c
@@ -64,3 +89,4 @@ services:
 
 volumes:
   delineate-storage-data:
+  delineate-storage-logs:

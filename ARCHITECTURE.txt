@@ -1,0 +1,99 @@
+Challenge 2 - Long-Running Download Architecture
+================================================
+
+This document describes a production-ready integration plan for the existing Hono-based download microservice so it can handle downloads ranging from 10 seconds to more than 2 minutes without timing out in front of reverse proxies or browsers. The approach favors resiliency, predictable UX, and cost-aware scaling.
+
+1. Architecture Overview
+------------------------
+Goals:
+- Acknowledge long-running work immediately to free up client and proxy connections.
+- Provide deterministic status tracking plus resumable downloads when users disconnect.
+- Support multiple concurrent downloads per user without overloading the API.
+- Reuse the existing S3-backed storage and align with the Node.js ecosystem (BullMQ, Redis).
+
+Component summary:
+- Client Tier: React/Next.js application that issues HTTP requests, polls for status, and initiates downloads.
+- Edge Tier: Cloudflare, nginx, or ALB terminating TLS and enforcing global timeouts.
+- API Tier: Hono-based download API that validates requests, enqueues jobs, and exposes status endpoints. Redis holds job metadata.
+- Worker Tier: BullMQ queue plus worker pods that process downloads, interact with storage, and update Redis.
+- Storage Tier: S3 or RustFS downloads bucket; optional CDN or object cache for accelerating final downloads.
+
+Data flow:
+- Fast download (about 10 seconds): Worker completes before the first poll; status immediately transitions to completed and returns a presigned URL. Edge timeouts never trigger because the initial POST returns quickly.
+- Slow download (90 to 120 seconds): Worker processes asynchronously; client polls every few seconds watching status move from queued to running to processing_artifacts to completed. Because job state lives in Redis, users can close the browser and later resume polling using the jobId.
+
+2. Technical Approach (Option A - Resilient Polling)
+----------------------------------------------------
+- Works through any HTTP proxy or CDN without requiring WebSockets or SSE.
+- Keeps the API surface RESTful and cache friendly while enabling retries with exponential backoff to avoid retry storms.
+- Allows stateless API pods focused on validation and enqueueing, while worker pods scale independently.
+- Serves as a lowest-common-denominator transport; push models can be layered later.
+
+3. Implementation Details
+-------------------------
+3.1 API contract:
+- POST /v1/download/initiate: accepts { fileIds: number[], priority?: "standard" or "low" } plus optional clientRequestId. Returns 202 Accepted with { jobId, status: "queued", nextPollInMs, expiresAt }. Replaces the current blocking /start route.
+- GET /v1/download/status/:jobId: returns { jobId, status, progressPercent, message, downloadUrl, checksum, startedAt, completedAt, attempts } with Cache-Control: no-store. Primary polling endpoint.
+- GET /v1/download/:jobId: if status is completed, respond with 302 redirect to the presigned URL or stream the file; otherwise return 409 plus the latest status payload. Enables resumable downloads.
+- POST /v1/download/cancel/:jobId (optional): marks a job as cancelled if still queued or running to help reclaim work or honor user-initiated aborts.
+
+3.2 Data and cache schema:
+- Primary store: Redis (self-hosted or managed) shared by BullMQ and the API.
+- Keys:
+  * download:job:{jobId} hash containing status, progressPercent, fileIds, downloadUrl, checksum, retries, errorCode, errorMessage, expiresAt, priority, userId, heartbeatAt.
+  * download:jobsByUser:{userId} sorted set keyed by createdAt to enforce per-user concurrency and list active jobs.
+  * download:url:{jobId} string storing the presigned URL with TTL matching the S3 expiry.
+- Status values: queued, running, processing_artifacts, completed, failed, cancelled, expired.
+- Default TTL: 24 hours after completion (configurable through DOWNLOAD_JOB_TTL_MS) with a nightly cleanup job.
+
+3.3 Background job processing:
+- Queue: BullMQ queue named download-jobs backed by Redis.
+- Producer (API): enqueueDownload(jobId, userId, fileIds, priority) using UUID v7 job IDs and deduplicate by clientRequestId to avoid double submissions.
+- Workers: Node-based worker pods or serverless functions with concurrency governed by DOWNLOAD_WORKER_CONCURRENCY. Each worker updates status to running, records heartbeat timestamps, streams source data, builds artifacts, uploads to the downloads bucket, generates short-lived presigned URLs (for example five minutes), and stores them in Redis or pushes to a CDN cache.
+- Observability: emit OpenTelemetry spans per job with jobId attributes plus structured logs for dashboards.
+
+3.4 Error handling and retries:
+- BullMQ retry policy: up to three attempts with exponential backoff (example intervals 5 s, 30 s, 2 min). Persist attempts and last error in Redis.
+- After exhausting retries, set status to failed, include errorCode, errorMessage, retryAfterMs, and optionally a supportTicketId.
+- Heartbeat watchdog: if heartbeat exceeds HEARTBEAT_TIMEOUT_MS, mark job as stalled so BullMQ can requeue or fail it.
+- POST /initiate honors clientRequestId to make endpoint idempotent.
+- Clients poll with jitter (random delay between four and eight seconds) to prevent synchronized spikes after outages.
+
+3.5 Timeout configuration:
+- Client fetch: abort after 5 seconds for initiate and status requests; allow two or more minutes for the actual download.
+- API server: REQUEST_TIMEOUT_MS set to 5 seconds for initiate and status routes; keep 30 seconds for other synchronous endpoints.
+- BullMQ worker: DOWNLOAD_JOB_TIMEOUT_MS set to 180 seconds (greater than worst-case 120 seconds) before marking a job as stalled.
+- Redis TTL: DOWNLOAD_JOB_TTL_MS default 86,400,000 ms (24 hours).
+- Cloudflare or CDN: origin max keepalive about 30 seconds so short operations finish safely.
+- nginx: proxy_connect_timeout 5 s, proxy_read_timeout 15 s for initiate/status; proxy_read_timeout 180 s with proxy_buffering off for /v1/download/:jobId to allow streaming.
+
+4. Proxy Configuration
+----------------------
+Cloudflare:
+- Origin rules: route /v1/download/initiate and /v1/download/status/* with an origin response timeout near 30 seconds; route /v1/download/* with the default 100 second timeout or upgrade to 600 seconds when artifacts are very large.
+- Cache rules: bypass cache for initiate and status routes; cache completed downloads via Tiered Cache if artifacts are shared among users, otherwise serve private objects by setting Cache-Control: private.
+- Additional settings: enable Proxy Keep Alive and HTTP/3 for faster resumes; optionally configure Cloudflare Workers or Queues later to push job updates.
+
+nginx in front of API pods:
+- Define an upstream (api-1:3000, api-2:3000) with keepalive connections.
+- Use a map to classify requests as short or long based on URI.
+- For short routes (initiate/status) set proxy timeouts of 5/15/15 seconds.
+- For long routes (/v1/download/:jobId) keep the same connect timeout, raise read/send timeouts to 180 seconds, and disable proxy_buffering so files stream directly to clients.
+
+5. Frontend Integration (React or Next.js)
+------------------------------------------
+1. Initiate download: call fetch("/v1/download/initiate", { method: "POST", body: JSON.stringify({ fileIds }) }) and store { jobId, expiresAt } inside React Query or SWR plus localStorage for resume-after-refresh support.
+2. Polling hook: configure React Query refetchInterval so polling stops when status === "completed" and otherwise uses jitter between 4 and 8 seconds; abort each request after 5 seconds and back off on HTTP 423 rate limit responses.
+3. Progress UI: map statuses to friendly copy (queued -> spinner, running -> progress bar, processing_artifacts -> "Packaging download"), compute ETA from progressPercent, expose attempts and errorMessage, and provide a "Try again" action that reuses clientRequestId.
+4. Completion: when status becomes completed, hit /v1/download/:jobId. If API responds with 302 the browser downloads instantly; if it returns JSON containing downloadUrl, redirect via window.location or present a link. Optionally use a hidden iframe to keep the page interactive while the download stream runs.
+5. Failure and retry: if status is failed and includes retryAfterMs, show a countdown before enabling a retry button. Expired jobs ask the user to initiate again.
+6. Multiple concurrent downloads: maintain a "My downloads" drawer listing active jobs (API endpoint aggregates download:jobsByUser). Each entry owns its own polling hook.
+7. Browser close scenario: persist job IDs in IndexedDB or localStorage and rehydrate them on startup by calling /v1/download/status/:jobId. If already completed, immediately call /v1/download/:jobId to resume the download.
+
+6. Additional Considerations
+----------------------------
+- Security: presigned URLs should be created by a least-privilege IAM role, carry short TTLs, and include hashed jobId segments to prevent guessing.
+- Cost: one managed Redis cluster powers BullMQ and status lookups; worker deployments can autoscale with KEDA based on queue depth; CDN caching and S3 lifecycle policies keep storage and egress predictable.
+- Monitoring: publish metrics such as download_job_duration_seconds and download_job_failed_total, and propagate traceparent headers so frontend, API, and worker traces correlate in OpenTelemetry tools.
+
+This plan decouples user latency from backend processing time, ensuring that even 120-second downloads complete reliably through real-world proxies while keeping the user experience responsive and transparent.
