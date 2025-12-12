@@ -195,26 +195,16 @@ const DownloadInitiateRequestSchema = z
       .min(1)
       .max(1000)
       .openapi({ description: "Array of file IDs (10K to 100M)" }),
-    clientRequestId: z
-      .string()
-      .min(3)
-      .max(128)
-      .optional()
-      .openapi({
-        description:
-          "Optional idempotency key supplied by the client to deduplicate download initiation",
-      }),
+    clientRequestId: z.string().min(3).max(128).optional().openapi({
+      description:
+        "Optional idempotency key supplied by the client to deduplicate download initiation",
+    }),
     priority: DownloadPrioritySchema.optional().openapi({
       description: "Queue priority for the job",
     }),
-    userId: z
-      .string()
-      .min(1)
-      .max(64)
-      .optional()
-      .openapi({
-        description: "Application user identifier for concurrency tracking",
-      }),
+    userId: z.string().min(1).max(64).optional().openapi({
+      description: "Application user identifier for concurrency tracking",
+    }),
   })
   .openapi("DownloadInitiateRequest");
 
@@ -229,13 +219,10 @@ const DownloadInitiateResponseSchema = z
     expiresAt: z
       .string()
       .openapi({ description: "ISO timestamp when the job record expires" }),
-    deduplicated: z
-      .boolean()
-      .optional()
-      .openapi({
-        description:
-          "Indicates if an existing job was returned for the provided clientRequestId",
-      }),
+    deduplicated: z.boolean().optional().openapi({
+      description:
+        "Indicates if an existing job was returned for the provided clientRequestId",
+    }),
   })
   .openapi("DownloadInitiateResponse");
 
@@ -536,7 +523,9 @@ const runJob = async (jobId: string) => {
       job.fileIds.map((fileId) => checkS3Availability(fileId)),
     );
 
-    const allAvailable = availabilityResults.every((result) => result.available);
+    const allAvailable = availabilityResults.every(
+      (result) => result.available,
+    );
     const totalSize =
       availabilityResults.reduce(
         (sum, result) => sum + (result.size ?? 0),
@@ -566,7 +555,8 @@ const runJob = async (jobId: string) => {
     job.retryAfterMs = 60000;
   } finally {
     clearInterval(progressTimer);
-    job.progressPercent = job.status === "completed" ? 100 : job.progressPercent;
+    job.progressPercent =
+      job.status === "completed" ? 100 : job.progressPercent;
     job.completedAt = Date.now();
     job.updatedAt = Date.now();
     job.expiresAt = Date.now() + env.DOWNLOAD_JOB_TTL_MS;
@@ -761,13 +751,10 @@ const downloadRetrieveRoute = createRoute({
         .openapi({ description: "Download job identifier" }),
     }),
     query: z.object({
-      format: z
-        .enum(["json"])
-        .optional()
-        .openapi({
-          description:
-            "Set to json to receive a JSON payload instead of a redirect",
-        }),
+      format: z.enum(["json"]).optional().openapi({
+        description:
+          "Set to json to receive a JSON payload instead of a redirect",
+      }),
     }),
   },
   responses: {
