@@ -1,0 +1,39 @@
+Client          API Gateway       Redis Queue       Worker          Storage
+  │                  │                 │               │               │
+  │ POST /initiate   │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │ 201 Created      │                 │               │               │
+  │ {jobId: "xyz"}   │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │               │               │
+  │ WS /subscribe    │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │ Connected        │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │ Pick job      │               │
+  │                  │                 ├───────────>│               │
+  │                  │                 │               │ Process...    │
+  │ WS: progress:10% │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │               │               │
+  │ [User closes     │                 │               │               │
+  │  browser tab]    │                 │               │               │
+  │ WS: disconnected │                 │               │               │
+  │                  │                 │               │               │
+  │ [User returns    │                 │               │               │
+  │  5 min later]    │                 │               │               │
+  │                  │                 │               │               │
+  │ GET /status/xyz  │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │                  │ Query Redis     │               │               │
+  │                  ├────────────>│               │               │
+  │ 200 OK           │                 │               │               │
+  │ {status:         │                 │               │               │
+  │  "completed"}    │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │               │               │
+  │ GET /download    │                 │               │               │
+  ├─────────────>│                 │               │  Get file     │
+  │                  ├─────────────────┼───────────────┼───>│
+  │ 200 OK (file)    │                 │               │               │
+  │<─────────────┤                 │               │               │

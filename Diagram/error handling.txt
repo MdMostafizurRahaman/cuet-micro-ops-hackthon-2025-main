@@ -1,0 +1,34 @@
+Client          API Gateway       Redis Queue       Worker          Storage
+  │                  │                 │               │               │
+  │ POST /initiate   │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │ 201 Created      │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │               │               │
+  │                  │                 │ Pick job      │               │
+  │                  │                 ├──────────>│               │
+  │                  │                 │               │ Process...    │
+  │                  │                 │               │ [TIMEOUT]     │
+  │                  │                 │               │ after 130s    │
+  │ WS: failed       │                 │ Job failed    │               │
+  │ {retryable:true} │                 │<─────── ───┤               │
+  │<─────────────────┼─────────┤               │               │
+  │                  │                 │               │               │
+  │ GET /status      │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │ 200 OK           │                 │               │               │
+  │ {status:"failed",│                 │               │               │
+  │  retryable:true, │                 │               │               │
+  │  retryCount:0}   │                 │               │               │
+  │<─────────────┤                 │               │               │
+  │                  │                 │               │               │
+  │ POST /retry      │                 │               │               │
+  ├─────────────>│                 │               │               │
+  │                  │ Re-queue job    │               │               │
+  │                  ├────────────>│               │               │
+  │ 200 OK           │                 │ Pick (retry 1)│               │
+  │ {jobId:"xyz-r1"} │                 ├─────── ───>│               │
+  │<─────────────┤                 │               │ Success!      │
+  │                  │                 │               ├───────────>│
+  │ WS: completed    │                 │               │               │
+  │<──────────────── ───────┼───────────────┤               │
