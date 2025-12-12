@@ -101,16 +101,16 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'image'
-          scan-ref: 'delineate-hackathon-challenge:${{ github.sha }}'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          scan-type: "image"
+          scan-ref: "delineate-hackathon-challenge:${{ github.sha }}"
+          format: "sarif"
+          output: "trivy-results.sarif"
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: "trivy-results.sarif"
 
   deploy:
     name: Deploy
