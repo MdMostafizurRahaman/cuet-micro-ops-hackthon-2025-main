@@ -1,47 +1,62 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "24"
+  DOCKER_IMAGE_NAME: delineate-hackathon-challenge
 
 jobs:
+  # Stage 1: Lint (ESLint, Prettier)
   lint:
-    name: Lint
+    name: "Lint: Backend (ESLint, Prettier)"
     runs-on: ubuntu-24.04
-    container:
-      image: node:24-slim
     steps:
-      - name: Checkout
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: 📦 Install dependencies
         run: npm ci
 
-      - name: Run ESLint
+      - name: 🔍 Run ESLint
         run: npm run lint
 
-      - name: Check formatting
+      - name: ✨ Check Prettier formatting
         run: npm run format:check
 
+  # Stage 2: Test (E2E)
   test:
-    name: E2E Tests
+    name: "Test: E2E Tests"
     runs-on: ubuntu-24.04
     needs: lint
-    container:
-      image: node:24-slim
     steps:
-      - name: Checkout
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: 📦 Install dependencies
         run: npm ci
 
-      - name: Run E2E tests
+      - name: 🧪 Run E2E tests
         run: npm run test:e2e
         env:
-          NODE_ENV: development
+          NODE_ENV: test
           PORT: 3000
           S3_REGION: us-east-1
           S3_BUCKET_NAME: ""
@@ -53,23 +68,143 @@ jobs:
           RATE_LIMIT_MAX_REQUESTS: "100"
           CORS_ORIGINS: "*"
 
+      - name: 📊 Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: test-results/
+          retention-days: 7
+
+  # Stage 3: Build (Docker)
   build:
-    name: Build Docker Image
+    name: "Build: Docker Image"
     runs-on: ubuntu-24.04
     needs: test
     steps:
-      - name: Checkout
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
+      - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: 🏗️ Build Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.prod
           push: false
-          tags: delineate-hackathon-challenge:${{ github.sha }}
+          tags: |
+            ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.DOCKER_IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/docker-image.tar
+
+      - name: 📤 Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  # Security Scan (Bonus)
+  security-scan:
+    name: "Security: Trivy Vulnerability Scan"
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: 🐳 Load Docker image
+        run: docker load --input /tmp/docker-image.tar
+
+      - name: 🔒 Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          format: "table"
+          exit-code: "0"
+          severity: "CRITICAL,HIGH"
+
+      - name: 🔒 Run Trivy vulnerability scanner (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          exit-code: "0"
+
+      - name: 📤 Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: 📊 Display Trivy scan summary
+        if: always()
+        run: |
+          echo "✅ Trivy security scan completed"
+          echo "Note: SARIF upload requires Code Scanning to be enabled"
+          echo "Enable it at: Settings > Code security and analysis > Code scanning"
+
+  # Stage 4: Deploy (Optional - Bonus)
+  deploy:
+    name: "Deploy: Production (Optional)"
+    runs-on: ubuntu-24.04
+    needs: [build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📥 Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: 🚀 Deploy to Cloud Platform
+        id: deploy
+        run: |
+          echo "🚀 Deployment would happen here"
+          echo "Configure your deployment platform (Railway, Render, Fly.io, etc.)"
+          echo "url=https://your-app.example.com" >> $GITHUB_OUTPUT
+
+  # Pipeline Status Summary
+  pipeline-status:
+    name: "Pipeline Status Summary"
+    runs-on: ubuntu-24.04
+    needs: [lint, test, build, security-scan]
+    if: always()
+    steps:
+      - name: ✅ Check pipeline status
+        run: |
+          echo "Pipeline Status Summary:"
+          echo "======================="
+          echo "Lint: ${{ needs.lint.result }}"
+          echo "Tests: ${{ needs.test.result }}"
+          echo "Build: ${{ needs.build.result }}"
+          echo "Security Scan: ${{ needs.security-scan.result }}"
+
+          if [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.security-scan.result }}" != "success" ]]; then
+            echo "❌ Pipeline failed!"
+            exit 1
+          else
+            echo "✅ Pipeline succeeded!"
+          fi

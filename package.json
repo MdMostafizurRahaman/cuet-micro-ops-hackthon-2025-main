@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "DOWNLOAD_DELAY_MIN_MS=5000 DOWNLOAD_DELAY_MAX_MS=15000 node --env-file=.env --experimental-transform-types --watch src/index.ts",
     "start": "DOWNLOAD_DELAY_MIN_MS=10000 DOWNLOAD_DELAY_MAX_MS=120000 node --env-file=.env --experimental-transform-types src/index.ts",
+    "build": "tsc -p .",
+    "start:prod": "node ./dist/index.js",
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "format": "prettier --write .",

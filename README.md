@@ -274,6 +274,8 @@ Set up a complete CI/CD pipeline for this service using a cloud provider's CI/CD
 
 ##### Choose One Cloud Provider
 
+GitHub Actions
+
 ##### Pipeline Stages
 
 Your pipeline must include these stages:
@@ -290,39 +292,82 @@ Your pipeline must include these stages:
 
 1. **Pipeline Configuration File**
    - `.github/workflows/ci.yml` (GitHub Actions)
-   - Equivalent for your chosen provider
 
 2. **Pipeline must**:
-   - [ ] Trigger on push to `main`/`master` branch
-   - [ ] Trigger on pull requests
-   - [ ] Run linting (`npm run lint`)
-   - [ ] Run format check (`npm run format:check`)
-   - [ ] Run E2E tests (`npm run test:e2e`)
-   - [ ] Build Docker image
-   - [ ] Cache dependencies for faster builds
-   - [ ] Fail fast on errors
-   - [ ] Report test results clearly
+   - [x] Trigger on push to `main`/`master` branch
+   - [x] Trigger on pull requests
+   - [x] Run linting (`npm run lint`)
+   - [x] Run format check (`npm run format:check`)
+   - [x] Run E2E tests (`npm run test:e2e`)
+   - [x] Build Docker image
+   - [x] Cache dependencies for faster builds
+   - [x] Fail fast on errors
+   - [x] Report test results clearly
 
 3. **Documentation**
-   - Add a "CI/CD" section to README with:
-     - Badge showing pipeline status
-     - Instructions for contributors
-     - How to run tests locally before pushing
+   - CI/CD section added to README
 
-##### Example: GitHub Actions (Reference)
+#### CI/CD Pipeline Status
 
-A basic GitHub Actions workflow is already provided at `.github/workflows/ci.yml`. You may:
+[![CI](https://github.com/Trina-SE/cuet-micro-ops-hackthon-2025-main/workflows/CI/badge.svg)](https://github.com/Trina-SE/cuet-micro-ops-hackthon-2025-main/actions)
 
-- Enhance the existing workflow
-- Migrate to a different provider
-- Add additional features (caching, parallelization, deployment)
+#### Pipeline Overview
 
-##### Bonus Points
+The CI/CD pipeline is implemented using GitHub Actions and includes the following jobs:
 
-- Set up automatic deployment to a cloud platform (Railway, Render, Fly.io, etc.)
-- Add security scanning (Snyk, CodeQL, Trivy)
-- Implement branch protection rules
-- Add Slack/Discord notifications for build status
+- **Lint**: Runs ESLint and Prettier format check
+- **Test**: Executes E2E tests
+- **Build**: Builds the Docker image
+- **Security Scan**: Scans the Docker image for vulnerabilities using Trivy
+- **Deploy**: Pushes the Docker image to GitHub Container Registry (on main branch pushes)
+
+#### Instructions for Contributors
+
+1. **Before pushing code**:
+   - Run linting: `npm run lint`
+   - Check formatting: `npm run format:check`
+   - Run E2E tests: `npm run test:e2e`
+   - Ensure all tests pass locally
+
+2. **Code formatting**:
+   - Use `npm run format` to auto-format code
+   - Use `npm run lint:fix` to auto-fix linting issues
+
+3. **Testing**:
+   - E2E tests simulate the full download workflow
+   - Tests verify API endpoints, job processing, and storage integration
+
+4. **Pull Requests**:
+   - All checks must pass before merging
+   - Pipeline runs on every PR to ensure quality
+
+#### Local Development Setup
+
+```bash
+# Install dependencies
+npm install
+
+# Run linting
+npm run lint
+
+# Check formatting
+npm run format:check
+
+# Run E2E tests
+npm run test:e2e
+
+# Start development server
+npm run dev
+
+# Start with Docker (development)
+npm run docker:dev
+```
+
+##### Bonus Points Implemented
+
+- **Security Scanning**: Added Trivy vulnerability scanner for Docker images
+- **Automatic Deployment**: Images are pushed to GitHub Container Registry on successful builds
+- **Caching**: Node modules and Docker layers are cached for faster builds
 
 ---
 
